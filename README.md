@@ -95,6 +95,6 @@ scripts/           build-web.sh · build-desktop.sh
 
 ## 与设计的对应
 
-- 产品概念 / 功能 / 架构设计文档未包含在本仓库（本地维护，`StudyForge_design/01~03`，v1.1）
+- 产品概念 / 系统功能 / 系统架构设计见 [`docs/`](docs/)（01~03，当前 v1.1）
 - 已知简化（相对正式版规划）：语言/考试模板包、Docker/Web 多用户版、自动更新、
   OS keychain 存储 API key、embedding 模型内置安装包（首次联网下载）、Windows 打包
