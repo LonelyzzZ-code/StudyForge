@@ -10,8 +10,6 @@ venv/
 web/dist/
 apps/desktop/release/
 apps/desktop/resources/
-dist/
-build/
 *.spec
 
 # python

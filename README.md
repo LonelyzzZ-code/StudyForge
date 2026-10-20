@@ -1,7 +1,22 @@
+<p align="center">
+  <img src="apps/desktop/build/icon.png" width="120" alt="StudyForge logo" />
+</p>
+
 # StudyForge
 
 开源、模型无关的 AI 学习内容引擎：输入学习目标，生成带测验的知识点学习路线（DAG），
 边学边测、错题补题、变式检验，学到「掌握基础」。
+
+## 下载安装（macOS）
+
+桌面安装包（含 Python 后端 sidecar，无需配置任何环境）：
+
+👉 **[StudyForge-1.0.0.dmg — 从 Releases 下载](https://github.com/LonelyzzZ-code/StudyForge/releases/latest)**
+
+- macOS 10.15+（Intel）
+- 应用未签名，首次打开需在「系统设置 → 隐私与安全性」允许
+- 启动后在「模型设置」页填入任意 OpenAI 兼容 API（如 DeepSeek）即可使用；
+  不填则以内置演示数据运行（完整体验流程，不调用任何 API）
 
 ## 功能总览
 
@@ -80,6 +95,6 @@ scripts/           build-web.sh · build-desktop.sh
 
 ## 与设计的对应
 
-- 产品概念 / 功能 / 架构设计：`../StudyForge_design/01~03`（当前 v1.1）
+- 产品概念 / 功能 / 架构设计文档未包含在本仓库（本地维护，`StudyForge_design/01~03`，v1.1）
 - 已知简化（相对正式版规划）：语言/考试模板包、Docker/Web 多用户版、自动更新、
-  OS keychain 存储 API key、embedding 模型内置安装包（首次联网下载）
+  OS keychain 存储 API key、embedding 模型内置安装包（首次联网下载）、Windows 打包
