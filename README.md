@@ -7,6 +7,10 @@
 一款开源的 AI 学习内容引擎：输入学习目标，AI根据用户需求生成学习路线（DAG），学习内容，测试内容，实践任务，帮助用户学会一项新技能～. 
 边学边测、错题补题、变式检验，学到「掌握基础」。
 
+## 设计初衷
+
+我们正身处 AI 大时代：知识的生产与获取方式正在被重构。与其焦虑或观望，不如主动学会**用 AI 帮助自己学习新知识**。StudyForge 把这个理念做成了工具——你只需说清「想学什么、有什么基础、想达到什么水平」，AI 就为你规划学习路线、编写讲义、出题检验、答疑解惑。学习的主角始终是你自己，AI 是随叫随到的私人助教。
+
 ## 下载安装（macOS）
 
 桌面安装包（含 Python 后端 sidecar，无需配置任何环境）：
@@ -31,30 +35,6 @@
 | 模型设置 | 四环节（planner/generator/grader/assistant）分别配模型，连通性测试，BYOK |
 | 成本记账 | 每次调用记账，路线维度汇总展示 |
 | 工程化 | 后台生成任务持久化 + 崩溃恢复 · 结构化输出降级链 · 429 退避 · 上下文预算裁剪 · embedding 质检（重复度/变式相似度） |
-
-## 运行（Web 形态，开发/演示）
-
-```bash
-cd server
-python3 -m venv ~/.venvs/studyforge-server          # venv 请放本地盘（见下方注意事项）
-~/.venvs/studyforge-server/bin/pip install -r requirements.txt
-~/.venvs/studyforge-server/bin/uvicorn app.main:app --port 8765
-# 浏览器打开 http://127.0.0.1:8765
-```
-
-前端开发：`cd web && npm install && npm run dev`（端口 5173，需代理 /api 到 8765）。
-
-## 运行（桌面应用）
-
-```bash
-scripts/build-web.sh        # 前端构建（本地盘）
-scripts/build-desktop.sh    # PyInstaller sidecar + electron-builder -> apps/desktop/release
-# 开发模式跑壳（直连已启动的 8765 后端）：
-cd apps/desktop && npm install && STUDYFORGE_DEV=1 npx electron .
-```
-
-桌面壳职责（03 架构 §二）：窗口管理、spawn/守护 Python sidecar（随机端口 + 健康检查）、
-单实例锁（防 SQLite 双开）、数据写入系统用户目录（userData/data）。
 
 ## 接入真实模型
 
