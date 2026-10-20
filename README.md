@@ -32,8 +32,6 @@
 | 成本记账 | 每次调用记账，路线维度汇总展示 |
 | 工程化 | 后台生成任务持久化 + 崩溃恢复 · 结构化输出降级链 · 429 退避 · 上下文预算裁剪 · embedding 质检（重复度/变式相似度） |
 
-不配置任何 API key 时自动运行**演示模式**（内置 Python 入门数据，完整体验全流程）。
-
 ## 运行（Web 形态，开发/演示）
 
 ```bash
@@ -83,8 +81,7 @@ apps/desktop/      Electron 壳（main.js/preload.js/electron-builder 配置）
 scripts/           build-web.sh · build-desktop.sh
 ```
 
-## 与设计的对应
+## 产品设计文档
 
 - 产品概念 / 系统功能 / 系统架构设计见 [`docs/`](docs/)（01~03，当前 v1.1）
-- 已知简化（相对正式版规划）：语言/考试模板包、Docker/Web 多用户版、自动更新、
-  OS keychain 存储 API key、embedding 模型内置安装包（首次联网下载）、Windows 打包
+
