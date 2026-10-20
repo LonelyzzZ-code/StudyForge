@@ -83,16 +83,6 @@ apps/desktop/      Electron 壳（main.js/preload.js/electron-builder 配置）
 scripts/           build-web.sh · build-desktop.sh
 ```
 
-## ⚠️ 本机（exFAT 外置卷）开发注意事项
-
-项目目录在 exFAT 卷上，会导致两类问题，均已绕开：
-
-1. **venv 必须放本地盘**（如 `~/.venvs/studyforge-server`）——exFAT 的 AppleDouble
-   `._*.pth` 元数据文件会被 Python 误读导致崩溃
-2. **npm/原生二进制会被写坏**（rolldown binding 截断等）——前端构建统一走
-   `scripts/build-web.sh`、桌面构建走 `scripts/build-desktop.sh`（本地盘构建、产物拷回），
-   不要直接在项目目录跑 `npm run build` / electron-builder
-
 ## 与设计的对应
 
 - 产品概念 / 系统功能 / 系统架构设计见 [`docs/`](docs/)（01~03，当前 v1.1）
