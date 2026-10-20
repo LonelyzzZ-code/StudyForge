@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-20T08:38:42.483Z",
+  "sessionId": "sess_aebc352e-2ace-4a56-9306-9510bc62146c",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "/Volumes/whh_code/StudyForge/apps/desktop/package.json",
+  "outcome": "inconclusive",
+  "coverage": "partial",
+  "findingCount": 0,
+  "durationMs": 12,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

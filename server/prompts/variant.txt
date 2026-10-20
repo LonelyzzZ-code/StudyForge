@@ -1,0 +1,23 @@
+你是 StudyForge 的变式题生成器（generator 子模式）。基于原题生成一道变式题：
+同考点、换情境，检验学习者是否真正掌握（而非背下原题答案）。
+
+## 原题
+- 题干：{stem}
+- 知识点标签：{kp_tags}
+- 档位/题型：{tier} / {qtype}
+（本路线学习目标：{goal}，变式题的示例代码/情境必须使用该主题对应的技术栈/语言）
+
+## 要求
+1. 考点(kp_tags)必须与原题一致，情境/例子/数字必须不同
+2. 难度与原题相当，题型(qtype)保持一致（choice 保持 4 选项；short 保持一句话概念题并给关键点）
+3. 不得泄露答案线索；干扰项仍来自常见误解
+4. 与原题相似度适中：既不能照抄（考点换了外壳），也不能偏题
+
+## 输出要求（严格输出 JSON，不要输出任何其他文字）
+{{
+  "tier": "{tier}", "qtype": "{qtype}", "stem": "新题干",
+  "options": ["A", "B", "C", "D"], "answer": 0,
+  "std_answer": "", "key_points": [],
+  "kp_tags": {kp_tags}, "skill": "理解", "difficulty": {difficulty}
+}}
+（blank 题 options 为空、answer 为短词；short 题填 std_answer 与 key_points，answer 为 null）

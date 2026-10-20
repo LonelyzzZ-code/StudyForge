@@ -1,0 +1,64 @@
+"""StudyForge demo server entry.
+
+Run (dev):
+    ~/.venvs/studyforge-server/bin/uvicorn app.main:app --port 8765
+"""
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from .api import router
+from .bus import bus
+from .db import init_db
+
+app = FastAPI(title="StudyForge", version="0.1.0-demo")
+
+app.add_middleware(
+    CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+app.include_router(router)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    init_db()
+    from .engine.content import recover_tasks
+
+    recover_tasks()  # 崩溃恢复：上次运行中断的任务重置为 pending（下一次流水线触发时执行）
+
+
+@app.get("/api/stream")
+async def stream(request: Request):
+    q = bus.subscribe()
+
+    async def gen():
+        try:
+            async for chunk in bus.stream(q):
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        finally:
+            bus.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# 前端构建产物托管（生产/演示形态；开发时用 vite dev server + proxy）
+DIST = Path(os.environ.get("STUDYFORGE_DIST")
+            or Path(__file__).resolve().parent.parent.parent / "web" / "dist")
+if DIST.exists():
+    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa(full_path: str):
+        file = DIST / full_path
+        if full_path and file.is_file():
+            return FileResponse(file)
+        return FileResponse(DIST / "index.html")

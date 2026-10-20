@@ -1,0 +1,510 @@
+"""REST API (full version)."""
+import asyncio
+import json
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlmodel import Session, select
+
+from .db import get_session
+from .domain.profiles import PROFILES, detect_domain
+from .llm import client as llm
+from .models import (AnswerRecord, Attempt, Edge, GenTask, LlmCall, Node,
+                     NodePackage, Question, Roadmap, Settings, WrongStat)
+from .bus import bus
+from .engine import assessment, content, roadmap as roadmap_engine
+from sqlalchemy import func
+
+router = APIRouter(prefix="/api")
+
+
+@router.get("/health")
+def health():
+    return {"ok": True}
+
+
+# ---------- F9 技术热点 ----------
+
+@router.get("/tech/radar")
+def tech_radar():
+    from .tech.radar_data import get_radar
+
+    return get_radar()
+
+
+# ---------- F10 学习问答（assistant，SSE 流式） ----------
+
+class AssistantBody(BaseModel):
+    node_id: Optional[int] = None
+    question: str
+    history: list = []          # [{role: "user"|"assistant", content}] 最近几轮
+
+
+@router.post("/assistant/chat")
+async def assistant_chat(body: AssistantBody, session: Session = Depends(get_session)):
+    from fastapi.responses import StreamingResponse
+
+    node_title, kp_list, summary, roadmap_id, goal = "（未指定节点）", "", "", None, ""
+    if body.node_id:
+        node = session.get(Node, body.node_id)
+        if node is not None:
+            roadmap_id = node.roadmap_id
+            node_title = node.title
+            kp_list = "、".join(node.kp_list)
+            pkg = session.exec(select(NodePackage).where(
+                NodePackage.node_id == node.id).order_by(NodePackage.id.desc())).first()
+            summary = (pkg.summary if pkg else node.summary)[:600]
+    if roadmap_id:
+        roadmap = session.get(Roadmap, roadmap_id)
+        if roadmap is not None:
+            goal = roadmap.goal
+
+    system = llm.ASSISTANT_SYSTEM.format(
+        goal=goal or "（未指定）",
+        node_title=node_title, kp_list=kp_list or "见讲义", summary=summary or "（生成中）")
+    messages = [{"role": "system", "content": system}]
+    for m in body.history[-6:]:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            messages.append({"role": m["role"], "content": str(m["content"])[:2000]})
+    messages.append({"role": "user", "content": body.question})
+
+    async def gen():
+        async for delta in llm.chat_stream(messages, roadmap_id):
+            yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------- settings ----------
+
+class RoleCfg(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+class SettingsBody(BaseModel):
+    planner_cfg: Optional[RoleCfg] = None
+    generator_cfg: Optional[RoleCfg] = None
+    grader_cfg: Optional[RoleCfg] = None
+    assistant_cfg: Optional[RoleCfg] = None
+
+
+@router.get("/settings")
+def get_settings(session: Session = Depends(get_session)):
+    settings = session.get(Settings, 1) or Settings(id=1)
+    return {
+        "planner_cfg": settings.planner_cfg, "generator_cfg": settings.generator_cfg,
+        "grader_cfg": settings.grader_cfg, "assistant_cfg": settings.assistant_cfg,
+        "mock_mode": {role: llm.mock_mode(role) for role in llm.ROLES},
+    }
+
+
+@router.put("/settings")
+def put_settings(body: SettingsBody, session: Session = Depends(get_session)):
+    settings = session.get(Settings, 1) or Settings(id=1)
+    for role in llm.ROLES:
+        cfg = getattr(body, f"{role}_cfg")
+        if cfg is not None:
+            setattr(settings, f"{role}_cfg", cfg.dict())
+    session.add(settings)
+    session.commit()
+    return {"ok": True}
+
+
+class TestBody(BaseModel):
+    role: str
+
+
+@router.post("/settings/test")
+async def test_settings(body: TestBody):
+    if body.role not in llm.ROLES:
+        raise HTTPException(400, f"未知环节 {body.role}")
+    return await llm.test_role(body.role)
+
+
+# ---------- roadmap ----------
+
+class RoadmapBody(BaseModel):
+    goal: str
+    base: str = ""
+    outcome: str = ""
+    time_budget: str = ""
+
+
+@router.post("/roadmaps", status_code=202)
+async def create_roadmap(body: RoadmapBody, session: Session = Depends(get_session)):
+    if not body.goal.strip():
+        raise HTTPException(400, "学习目标不能为空")
+    domain = detect_domain(body.goal)
+    if domain != "code":
+        raise HTTPException(400, {
+            "message": "当前版本仅支持编程技术领域（demo 仅内置 code 模板包）",
+            "supported": list(PROFILES.keys())})
+    roadmap = Roadmap(goal=body.goal.strip(), base=body.base.strip(),
+                      outcome=body.outcome.strip(), time_budget=body.time_budget.strip(),
+                      domain="code", status="planning")
+    session.add(roadmap)
+    session.commit()
+    asyncio.create_task(roadmap_engine.generate_roadmap(roadmap.id))
+    return {"id": roadmap.id, "status": "planning"}
+
+
+@router.get("/roadmaps")
+def list_roadmaps(session: Session = Depends(get_session)):
+    roadmaps = session.exec(select(Roadmap).order_by(Roadmap.id.desc())).all()
+    result = []
+    for r in roadmaps:
+        nodes = session.exec(select(Node).where(Node.roadmap_id == r.id)).all()
+        done = sum(1 for n in nodes if n.status in ("passed", "mastered"))
+        result.append({"id": r.id, "goal": r.goal, "domain": r.domain, "status": r.status,
+                       "created_at": r.created_at.isoformat(),
+                       "total_nodes": len(nodes), "done_nodes": done})
+    return result
+
+
+def _roadmap_detail(session: Session, roadmap: Roadmap) -> Dict[str, Any]:
+    nodes = session.exec(select(Node).where(
+        Node.roadmap_id == roadmap.id, Node.status != "deleted")).all()
+    edges = session.exec(select(Edge).where(Edge.roadmap_id == roadmap.id)).all()
+    id2node = {n.id: n for n in nodes}
+    pkg_status: Dict[int, str] = {}
+    for pkg in session.exec(select(NodePackage).where(
+            NodePackage.node_id.in_(list(id2node) or [0])).order_by(NodePackage.id.desc())).all():
+        if pkg.node_id not in pkg_status or pkg_status[pkg.node_id] == "generating":
+            if pkg.status in ("ready", "suspect") or pkg.node_id not in pkg_status:
+                pkg_status[pkg.node_id] = pkg.status
+    node_list = [{
+        "id": n.id, "ext_key": n.ext_key, "title": n.title, "summary": n.summary,
+        "kp_list": n.kp_list, "est_minutes": n.est_minutes, "order_index": n.order_index,
+        "status": n.status, "concept_done": n.concept_done, "basic_done": n.basic_done,
+        "package_status": pkg_status.get(n.id, "pending"),
+    } for n in sorted(nodes, key=lambda x: x.order_index)]
+    edge_list = [{
+        "from": id2node[e.from_node].ext_key if e.from_node in id2node else str(e.from_node),
+        "to": id2node[e.to_node].ext_key if e.to_node in id2node else str(e.to_node),
+    } for e in edges]
+    done = sum(1 for n in nodes if n.status in ("passed", "mastered"))
+    return {
+        "id": roadmap.id, "goal": roadmap.goal, "base": roadmap.base,
+        "outcome": roadmap.outcome, "time_budget": roadmap.time_budget,
+        "domain": roadmap.domain, "status": roadmap.status,
+        "outline": roadmap.outline, "nodes": node_list, "edges": edge_list,
+        "progress": {"done": done, "total": len(nodes),
+                     "est_minutes_total": sum(n.est_minutes for n in nodes)},
+    }
+
+
+@router.get("/roadmaps/{rid}")
+def get_roadmap(rid: int, session: Session = Depends(get_session)):
+    roadmap = session.get(Roadmap, rid)
+    if roadmap is None:
+        raise HTTPException(404, "路线不存在")
+    return _roadmap_detail(session, roadmap)
+
+
+@router.delete("/roadmaps/{rid}")
+async def delete_roadmap(rid: int, session: Session = Depends(get_session)):
+    roadmap = session.get(Roadmap, rid)
+    if roadmap is None:
+        raise HTTPException(404, "路线不存在")
+    content.void_roadmap_tasks(rid)
+    node_ids = [n.id for n in session.exec(
+        select(Node).where(Node.roadmap_id == rid)).all()] or [0]
+    attempt_ids = [a.id for a in session.exec(
+        select(Attempt).where(Attempt.node_id.in_(node_ids))).all()] or [0]
+    for r in session.exec(select(AnswerRecord).where(AnswerRecord.attempt_id.in_(attempt_ids))).all():
+        session.delete(r)
+    for r in session.exec(select(Attempt).where(Attempt.node_id.in_(node_ids))).all():
+        session.delete(r)
+    for model, col in ((Question, Question.node_id), (NodePackage, NodePackage.node_id),
+                       (WrongStat, WrongStat.node_id)):
+        for r in session.exec(select(model).where(col.in_(node_ids))).all():
+            session.delete(r)
+    for r in session.exec(select(Edge).where(Edge.roadmap_id == rid)).all():
+        session.delete(r)
+    for r in session.exec(select(Node).where(Node.roadmap_id == rid)).all():
+        session.delete(r)
+    session.delete(roadmap)
+    session.commit()
+    return {"ok": True}
+
+
+@router.post("/roadmaps/{rid}/nodes/{nid}/master")
+def master_node(rid: int, nid: int, session: Session = Depends(get_session)):
+    node = session.get(Node, nid)
+    if node is None or node.roadmap_id != rid:
+        raise HTTPException(404, "节点不存在")
+    node.status = "mastered"
+    node.concept_done = True
+    node.basic_done = True
+    session.add(node)
+    session.commit()
+    unlocked = roadmap_engine.unlock_successors(session, nid)
+    session.commit()
+    bus.publish("node.status", rid, {
+        "node_id": nid, "ext_key": node.ext_key, "status": "mastered", "unlocked": unlocked})
+    return {"ok": True, "unlocked_nodes": unlocked}
+
+
+# ---------- F3: 删除节点(自动重连) / 重生成分支 ----------
+
+@router.get("/roadmaps/{rid}/nodes/{nid}/impact")
+def delete_impact(rid: int, nid: int, session: Session = Depends(get_session)):
+    """删除影响面预览：方案 a —— 后继依赖自动重连到被删节点的前置上。"""
+    node = session.get(Node, nid)
+    if node is None or node.roadmap_id != rid:
+        raise HTTPException(404, "节点不存在")
+    edges = session.exec(select(Edge).where(Edge.roadmap_id == rid)).all()
+    nodes = session.exec(select(Node).where(
+        Node.roadmap_id == rid, Node.status != "deleted")).all()
+    id2node = {n.id: n for n in nodes}
+    pred_ids = [e.from_node for e in edges if e.to_node == nid]
+    succ_ids = [e.to_node for e in edges if e.from_node == nid]
+    rewires = []
+    for s in succ_ids:
+        s_preds = [e.from_node for e in edges if e.to_node == s and e.from_node != nid]
+        new_preds = sorted(set(s_preds + pred_ids))
+        rewires.append({
+            "successor": {"id": s, "title": id2node[s].title if s in id2node else str(s)},
+            "new_predecessors": [{"id": p, "title": id2node[p].title if p in id2node else str(p)}
+                                 for p in new_preds],
+        })
+    return {
+        "node": {"id": nid, "title": node.title},
+        "rewires": rewires,
+        "has_successors": bool(succ_ids),
+        "message": ("删除后，后继节点的依赖将自动重连到本节点的前置上"
+                    if succ_ids else "该节点无后继，删除不影响其他节点"),
+    }
+
+
+@router.delete("/roadmaps/{rid}/nodes/{nid}")
+async def delete_node(rid: int, nid: int, session: Session = Depends(get_session)):
+    node = session.get(Node, nid)
+    if node is None or node.roadmap_id != rid:
+        raise HTTPException(404, "节点不存在")
+    edges = session.exec(select(Edge).where(Edge.roadmap_id == rid)).all()
+    pred_ids = [e.from_node for e in edges if e.to_node == nid]
+    succ_ids = [e.to_node for e in edges if e.from_node == nid]
+    # 方案 a：p->n->s 变 p->s（避免重复边）
+    existing = {(e.from_node, e.to_node) for e in edges}
+    for s in succ_ids:
+        for p in pred_ids:
+            if p != s and (p, s) not in existing:
+                session.add(Edge(roadmap_id=rid, from_node=p, to_node=s))
+    for e in edges:
+        if e.from_node == nid or e.to_node == nid:
+            session.delete(e)
+    node.status = "deleted"
+    session.add(node)
+    # 作废该节点的生成任务
+    for t in session.exec(select(GenTask).where(
+            GenTask.roadmap_id == rid,
+            GenTask.status.in_(("pending", "running")))).all():
+        if t.payload.get("node_id") == nid:
+            t.status = "void"
+            session.add(t)
+    session.commit()
+    bus.publish("node.deleted", rid, {"node_id": nid, "rewired": len(succ_ids) * len(pred_ids)})
+    return {"ok": True}
+
+
+@router.post("/roadmaps/{rid}/nodes/{nid}/regenerate-branch")
+async def regenerate_branch(rid: int, nid: int, session: Session = Depends(get_session)):
+    """以某节点为根重新生成子图（保留已通过节点的内容）。"""
+    node = session.get(Node, nid)
+    if node is None or node.roadmap_id != rid:
+        raise HTTPException(404, "节点不存在")
+    nodes = session.exec(select(Node).where(
+        Node.roadmap_id == rid, Node.status != "deleted")).all()
+    edges = session.exec(select(Edge).where(Edge.roadmap_id == rid)).all()
+    adj = {}
+    for e in edges:
+        adj.setdefault(e.from_node, []).append(e.to_node)
+    # BFS 找后代
+    descendants = []
+    seen = {nid}
+    queue = list(adj.get(nid, []))
+    while queue:
+        cur = queue.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        descendants.append(cur)
+        queue.extend(adj.get(cur, []))
+    targets = [n for n in nodes if n.id in ([nid] + descendants)
+               and n.status not in ("passed", "mastered")]
+    for t in targets:
+        content.enqueue(session, rid, "package", {"node_id": t.id}, content.PRIO_BG)
+    if targets:
+        await content.ensure_pipeline(rid)
+    bus.publish("roadmap.updated", rid, {"regenerated": [t.id for t in targets]})
+    return {"ok": True, "regenerated_nodes": [t.id for t in targets]}
+
+
+# ---------- F4 P1: 这段没懂 / F8: 成本 ----------
+
+class SectionBody(BaseModel):
+    section_index: int
+
+
+@router.post("/nodes/{nid}/regenerate-section")
+async def regenerate_section(nid: int, body: SectionBody,
+                             session: Session = Depends(get_session)):
+    node = session.get(Node, nid)
+    if node is None:
+        raise HTTPException(404, "节点不存在")
+    try:
+        result = await content.regenerate_section(nid, body.section_index,
+                                                  roadmap_id=node.roadmap_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
+    return result
+
+
+@router.get("/roadmaps/{rid}/cost")
+def roadmap_cost(rid: int, session: Session = Depends(get_session)):
+    roadmap = session.get(Roadmap, rid)
+    if roadmap is None:
+        raise HTTPException(404, "路线不存在")
+    rows = session.exec(
+        select(LlmCall.role, LlmCall.purpose, func.count(), func.sum(
+            LlmCall.prompt_tokens + LlmCall.completion_tokens), func.sum(LlmCall.latency_ms))
+        .where(LlmCall.roadmap_id == rid, LlmCall.status == "ok")
+        .group_by(LlmCall.role, LlmCall.purpose)).all()
+    breakdown = [{"role": r, "purpose": p, "calls": c, "tokens": int(t or 0),
+                  "latency_ms": int(l or 0)} for r, p, c, t, l in rows]
+    return {
+        "roadmap_id": rid,
+        "total_calls": sum(b["calls"] for b in breakdown),
+        "total_tokens": sum(b["tokens"] for b in breakdown),
+        "total_latency_ms": sum(b["latency_ms"] for b in breakdown),
+        "breakdown": breakdown,
+    }
+
+
+# ---------- node: package / quiz ----------
+
+@router.get("/nodes/{nid}/package")
+def get_package(nid: int, session: Session = Depends(get_session)):
+    node = session.get(Node, nid)
+    if node is None:
+        raise HTTPException(404, "节点不存在")
+    pkg = session.exec(select(NodePackage).where(
+        NodePackage.node_id == nid).order_by(NodePackage.id.desc())).first()
+    weak = session.exec(select(WrongStat).where(
+        WrongStat.node_id == nid, WrongStat.wrong_count >= 2)).all()
+    return {
+        "node": {"id": node.id, "title": node.title, "summary": node.summary,
+                 "kp_list": node.kp_list, "status": node.status,
+                 "concept_done": node.concept_done, "basic_done": node.basic_done},
+        "package_status": pkg.status if pkg else "pending",
+        "lecture": pkg.lecture or None if pkg else None,
+        "summary": pkg.summary if pkg else "",
+        "practice": pkg.practice or None if pkg else None,
+        "weak_tags": [{"tag": w.tag, "wrong_count": w.wrong_count} for w in weak],
+    }
+
+
+class AttemptBody(BaseModel):
+    tier: str = "concept"
+
+
+@router.post("/nodes/{nid}/attempts")
+def create_attempt(nid: int, body: AttemptBody, session: Session = Depends(get_session)):
+    if body.tier not in ("concept", "basic"):
+        raise HTTPException(400, "tier 必须是 concept 或 basic")
+    node = session.get(Node, nid)
+    if node is None:
+        raise HTTPException(404, "节点不存在")
+    if node.status == "locked":
+        raise HTTPException(400, "节点未解锁：需先通过前序节点")
+    if body.tier == "basic" and not node.concept_done:
+        raise HTTPException(400, "基础理解档未解锁：需先通过概念记忆档（≥85%）")
+    pkg = session.exec(select(NodePackage).where(
+        NodePackage.node_id == nid, NodePackage.status.in_(("ready", "suspect")))
+        .order_by(NodePackage.id.desc())).first()
+    if pkg is None:
+        raise HTTPException(400, "内容未就绪，请稍候")
+    questions = session.exec(select(Question).where(
+        Question.package_id == pkg.id, Question.tier == body.tier,
+    ).order_by(Question.id)).all()
+    attempt = Attempt(node_id=nid, tier=body.tier)
+    session.add(attempt)
+    session.commit()
+    return {"attempt_id": attempt.id, "tier": body.tier,
+            "questions": [assessment.public_question(q) for q in questions]}
+
+
+class AnswerBody(BaseModel):
+    question_id: int
+    user_answer: Any
+    is_repair: bool = False
+
+
+@router.post("/attempts/{aid}/answers")
+async def submit_answer(aid: int, body: AnswerBody, session: Session = Depends(get_session)):
+    attempt = session.get(Attempt, aid)
+    if attempt is None:
+        raise HTTPException(404, "测验不存在")
+    q = session.get(Question, body.question_id)
+    if q is None or q.node_id != attempt.node_id:
+        raise HTTPException(404, "题目不存在")
+    node = session.get(Node, attempt.node_id)
+
+    correct, detail = await assessment.grade_answer(q, body.user_answer,
+                                                    roadmap_id=node.roadmap_id if node else None)
+    record = AnswerRecord(attempt_id=aid, question_id=q.id, user_answer=body.user_answer,
+                          correct=correct, is_repair=body.is_repair,
+                          graded_by="llm" if q.qtype == "short" else "rule",
+                          grade_detail={"reason": detail.get("reason", ""),
+                                        "hits": detail.get("hits", []),
+                                        "misses": detail.get("misses", [])})
+    session.add(record)
+
+    weak_tags: List[Dict[str, Any]] = []
+    repair_question: Optional[Dict[str, Any]] = None
+    if not correct:
+        weak_tags = assessment.record_wrong(session, q.node_id, q.kp_tags)
+        appeared = session.exec(select(AnswerRecord.question_id).where(
+            AnswerRecord.attempt_id == aid)).all()
+        repair = assessment.next_repair_question(
+            session, q.node_id, q.kp_tags, list(appeared), current_id=q.id)
+        if repair is not None:
+            repair_question = assessment.public_question(repair)
+    session.commit()
+
+    return {"correct": correct, "is_repair": body.is_repair, **detail,
+            "repair_question": repair_question, "weak_tags": weak_tags}
+
+
+class VariantBody(BaseModel):
+    question_id: int          # 原错题 id
+
+
+@router.post("/attempts/{aid}/variant")
+async def create_variant(aid: int, body: VariantBody, session: Session = Depends(get_session)):
+    """错题修复后请求变式题检验（同步生成，含相似度区间校验）。"""
+    attempt = session.get(Attempt, aid)
+    if attempt is None:
+        raise HTTPException(404, "测验不存在")
+    q = session.get(Question, body.question_id)
+    if q is None or q.node_id != attempt.node_id:
+        raise HTTPException(404, "原题不存在")
+    node = session.get(Node, attempt.node_id)
+    variant = await content.generate_variant(q, node.roadmap_id if node else None)
+    return {"variant": variant, "origin_id": q.id}
+
+
+@router.post("/attempts/{aid}/finish")
+async def finish(aid: int, session: Session = Depends(get_session)):
+    attempt = session.get(Attempt, aid)
+    if attempt is None:
+        raise HTTPException(404, "测验不存在")
+    return assessment.finish_attempt(session, attempt)

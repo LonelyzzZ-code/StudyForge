@@ -1,0 +1,176 @@
+"""E3 assessment: rule grading, short-answer grading, wrong-tag stats, repair loop."""
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlmodel import Session, select
+
+from ..llm import client as llm
+from ..models import AnswerRecord, Attempt, Node, NodePackage, Question, WrongStat
+
+logger = logging.getLogger("studyforge.assessment")
+
+SHORT_PASS_RATIO = 0.6  # 关键点命中率 ≥60% 判过（demo: mock 判分 & prompt 共用标准）
+
+
+def public_question(q: Question, with_answer: bool = False) -> Dict[str, Any]:
+    """题目输出给前端；默认剥离答案类字段（判分前不可见）。"""
+    data: Dict[str, Any] = {
+        "id": q.id, "tier": q.tier, "qtype": q.qtype, "stem": q.stem,
+        "options": q.options, "kp_tags": q.kp_tags, "skill": q.skill, "difficulty": q.difficulty,
+    }
+    if with_answer:
+        data["answer"] = q.answer
+        data["std_answer"] = q.std_answer
+        data["key_points"] = q.key_points
+    return data
+
+
+def _norm(text: Any) -> str:
+    return str(text or "").strip().lower().replace(" ", "").replace("，", ",").replace("（", "(").replace("）", ")")
+
+
+def _bigrams(text: str) -> set:
+    t = _norm(text)
+    return {t[i:i + 2] for i in range(len(t) - 1)} if len(t) >= 2 else {t}
+
+
+def _grade_short_mock(q: Question, user_answer: str) -> Dict[str, Any]:
+    """演示模式判分：关键点字符 bigram 重合率 ≥50% 视为命中（真实模式走 grader LLM）。"""
+    text_bigrams = _bigrams(user_answer)
+    hits, misses = [], []
+    for kp in q.key_points:
+        kp_bg = _bigrams(kp)
+        overlap = len(kp_bg & text_bigrams) / max(1, len(kp_bg))
+        (hits if overlap >= 0.5 else misses).append(kp)
+    return {
+        "pass": len(hits) >= max(1, round(len(q.key_points) * SHORT_PASS_RATIO)),
+        "hits": hits, "misses": misses,
+        "reason": f"关键点核对：命中 {len(hits)}/{len(q.key_points)}",
+    }
+
+
+async def _grade_short_llm(q: Question, user_answer: str, roadmap_id: Optional[int] = None) -> Dict[str, Any]:
+    prompt = llm.load_prompt("grader").format(
+        stem=q.stem, std_answer=q.std_answer,
+        key_points="、".join(q.key_points), user_answer=user_answer)
+    result = await llm.call_json("grader", prompt, mock_payload=None,
+                                 purpose="grade-short", roadmap_id=roadmap_id)
+    return {
+        "pass": bool(result.get("pass")),
+        "hits": result.get("hits", []), "misses": result.get("misses", []),
+        "reason": result.get("reason", ""),
+    }
+
+
+async def grade_answer(q: Question, user_answer: Any,
+                       roadmap_id: Optional[int] = None) -> Tuple[bool, Dict[str, Any]]:
+    """判一道题。返回 (correct, detail)；detail 含 std_answer 供答题后展示。"""
+    detail: Dict[str, Any] = {}
+    if q.qtype == "choice":
+        correct = str(user_answer) == str(q.answer)
+        detail["std_answer"] = q.options[q.answer] if isinstance(q.answer, int) and q.answer < len(q.options) else q.answer
+        detail["reason"] = "规则判分"
+    elif q.qtype == "blank":
+        correct = _norm(user_answer) == _norm(q.answer)
+        detail["std_answer"] = q.answer
+        detail["reason"] = "规则判分"
+    else:  # short
+        result: Dict[str, Any]
+        if llm.mock_mode("grader"):
+            result = _grade_short_mock(q, str(user_answer))
+        else:
+            try:
+                result = await _grade_short_llm(q, str(user_answer), roadmap_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("grader 调用失败，降级规则判分: %s", e)
+                result = _grade_short_mock(q, str(user_answer))
+                result["reason"] += "（判分模型暂不可用，已用规则核对）"
+        correct = bool(result["pass"])
+        detail.update(result)
+        detail["std_answer"] = q.std_answer
+        detail["key_points"] = q.key_points
+    return correct, detail
+
+
+def record_wrong(session: Session, node_id: int, kp_tags: List[str]) -> List[Dict[str, Any]]:
+    """错题标签统计 +1；返回达到薄弱阈值(≥2)的标签。"""
+    weak: List[Dict[str, Any]] = []
+    for tag in kp_tags:
+        stat = session.exec(select(WrongStat).where(
+            WrongStat.node_id == node_id, WrongStat.tag == tag)).first()
+        if stat is None:
+            stat = WrongStat(node_id=node_id, tag=tag, wrong_count=0)
+        stat.wrong_count += 1
+        session.add(stat)
+        if stat.wrong_count >= 2:
+            weak.append({"tag": tag, "wrong_count": stat.wrong_count})
+    session.commit()
+    return weak
+
+
+def next_repair_question(session: Session, node_id: int, kp_tags: List[str],
+                         exclude_ids: List[int], current_id: Optional[int] = None) -> Optional[Question]:
+    """同标签补题：优先低难度、未做过的题（零 LLM 调用，题库内筛选）。"""
+    used = set(exclude_ids)
+    same_tag = session.exec(select(Question).where(
+        Question.node_id == node_id)).all()
+    tagged = [q for q in same_tag if set(q.kp_tags) & set(kp_tags)]
+    # 1) 同标签未做过 → 2) 同标签做过但不是刚答错的 → 3) 任意低难度题 → 4) 重出原题
+    for pool in (
+        [q for q in tagged if q.id not in used],
+        [q for q in tagged if q.id != current_id],
+        [q for q in same_tag if q.id != current_id and q.tier == "concept"],
+    ):
+        if pool:
+            pool.sort(key=lambda q: (q.difficulty, q.tier != "concept"))
+            return pool[0]
+    return next((q for q in same_tag if q.id == current_id), None)
+
+
+def finish_attempt(session: Session, attempt: Attempt) -> Dict[str, Any]:
+    """结算：主流程正确率(补题不计) -> 85% 门槛 -> 档位完成 -> 解锁后继。"""
+    from ..domain.profiles import get_profile
+    from .roadmap import unlock_successors
+    from ..bus import bus
+
+    threshold = get_profile("code").get("mastery_threshold", 0.85)
+    records = session.exec(select(AnswerRecord).where(
+        AnswerRecord.attempt_id == attempt.id)).all()
+    main = [r for r in records if not r.is_repair]
+    correct = sum(1 for r in main if r.correct)
+    accuracy = (correct / len(main)) if main else 0.0
+    passed = bool(main) and accuracy >= threshold
+
+    attempt.accuracy = accuracy
+    attempt.passed = passed
+
+    node = session.get(Node, attempt.node_id)
+    roadmap_id = node.roadmap_id
+    unlocked_ids: List[int] = []
+    node_done = False
+    if passed:
+        if attempt.tier == "concept":
+            node.concept_done = True
+        else:
+            node.basic_done = True
+            node.status = "passed"
+            node_done = True
+            unlocked_ids = unlock_successors(session, node.id)
+        session.add(node)
+    attempt.finished_at = datetime.utcnow()
+    session.add(attempt)
+    session.commit()
+
+    if node_done:
+        bus.publish("node.status", roadmap_id, {
+            "node_id": node.id, "ext_key": node.ext_key, "status": "passed",
+            "unlocked": unlocked_ids})
+        from . import content
+        content.schedule_refill(roadmap_id)
+
+    return {
+        "attempt_id": attempt.id, "tier": attempt.tier, "passed": passed,
+        "accuracy": accuracy, "total": len(main), "correct": correct,
+        "node_passed": node_done, "unlocked_nodes": unlocked_ids,
+    }

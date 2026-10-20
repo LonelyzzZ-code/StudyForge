@@ -1,0 +1,137 @@
+"""SQLModel tables (demo subset of 03 architecture data model)."""
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import JSON, Column
+from sqlmodel import Field, SQLModel
+
+
+def _json() -> Any:
+    return Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class Settings(SQLModel, table=True):
+    id: Optional[int] = Field(default=1, primary_key=True)
+    planner_cfg: Dict[str, Any] = _json()    # {base_url, api_key, model}
+    generator_cfg: Dict[str, Any] = _json()
+    grader_cfg: Dict[str, Any] = _json()
+    assistant_cfg: Dict[str, Any] = _json()  # 留空 = 继承 generator
+
+
+class Roadmap(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    goal: str
+    base: str = ""
+    outcome: str = ""
+    time_budget: str = ""
+    domain: str = "code"
+    outline: List[Dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    status: str = "planning"  # planning / learning / done / failed
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Node(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    roadmap_id: int = Field(foreign_key="roadmap.id", index=True)
+    ext_key: str                       # planner 稳定 ID: n1, n2...
+    title: str
+    summary: str = ""                  # 摘要级描述(全局大纲来源)
+    kp_list: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    est_minutes: int = 60
+    order_index: int = 0               # DAG 拓扑序
+    status: str = "locked"             # locked/unlocked/learning/passed/mastered
+    concept_done: bool = False
+    basic_done: bool = False
+
+
+class Edge(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    roadmap_id: int = Field(foreign_key="roadmap.id", index=True)
+    from_node: int = Field(foreign_key="node.id")
+    to_node: int = Field(foreign_key="node.id")
+
+
+class NodePackage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    version: int = 1
+    status: str = "pending"            # pending/generating/ready/suspect
+    lecture: Dict[str, Any] = _json()  # {sections: [{title, content}]}
+    summary: str = ""
+    practice: Dict[str, Any] = _json()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Question(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    package_id: int = Field(foreign_key="nodepackage.id", index=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    tier: str = "concept"              # concept / basic
+    qtype: str = "choice"              # choice / blank / short
+    stem: str
+    options: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    answer: Any = Field(default=None, sa_column=Column(JSON))  # choice: int index; blank: str
+    kp_tags: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    skill: str = "记忆"
+    difficulty: int = 1
+    std_answer: str = ""               # short only
+    key_points: List[str] = Field(default_factory=list, sa_column=Column(JSON))  # short only
+    is_variant: bool = False           # 变式题标记
+    variant_of_id: Optional[int] = Field(default=None, foreign_key="question.id")
+
+
+class Attempt(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    tier: str = "concept"
+    passed: bool = False
+    accuracy: Optional[float] = None
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    finished_at: datetime = Field(default=None, nullable=True)
+
+
+class AnswerRecord(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    attempt_id: int = Field(foreign_key="attempt.id", index=True)
+    question_id: int = Field(foreign_key="question.id")
+    user_answer: Any = Field(default=None, sa_column=Column(JSON))
+    correct: bool = False
+    is_repair: bool = False            # 补题不计入正确率
+    graded_by: str = "rule"            # rule / llm
+    grade_detail: Dict[str, Any] = _json()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class WrongStat(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    tag: str
+    wrong_count: int = 0
+
+
+class GenTask(SQLModel, table=True):
+    """生成任务队列（持久化 + 崩溃恢复）。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    roadmap_id: int = Field(foreign_key="roadmap.id", index=True)
+    task_type: str = "package"          # package / variant / section
+    payload: Dict[str, Any] = _json()
+    priority: int = 0                   # 大者先执行：前台(variant) > 后台(package)
+    status: str = "pending"             # pending/running/done/void
+    attempt_no: int = 0
+    error: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class LlmCall(SQLModel, table=True):
+    """F8 成本记账：每次 LLM 调用一行。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=datetime.utcnow, index=True)
+    role: str = Field(index=True)       # planner / generator / grader
+    purpose: str = ""
+    model: str = ""
+    roadmap_id: Optional[int] = Field(default=None, index=True)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_ms: int = 0
+    status: str = "ok"                  # ok / mock / bad_output / error

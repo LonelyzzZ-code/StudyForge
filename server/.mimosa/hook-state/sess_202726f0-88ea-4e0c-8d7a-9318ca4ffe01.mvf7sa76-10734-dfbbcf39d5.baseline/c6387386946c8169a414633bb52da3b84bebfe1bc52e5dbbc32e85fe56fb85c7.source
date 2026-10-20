@@ -1,0 +1,272 @@
+"""LLM access layer (E5-L1, full version).
+
+- 每环节(role)独立读 settings；未配置 → 演示模式(mock)
+- 降级链: JSON mode → 裸提示词(内嵌 schema) + 解析失败重试(≤2)，按 base_url 缓存能力
+- 429/5xx 指数退避重试(3)
+- 上下文预算裁剪(按优先级截断)
+- token 记账(llm_call 表)
+"""
+import asyncio
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+from sqlmodel import Session
+
+from ..db import engine
+from ..models import LlmCall, Settings
+
+logger = logging.getLogger("studyforge.llm")
+PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+ROLES = ("planner", "generator", "grader", "assistant")
+
+RETRY_ON_STATUS = 3
+JSON_PARSE_RETRY = 2
+
+
+def load_prompt(name: str) -> str:
+    return (PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8")
+
+
+def _raw_role_cfg(role: str) -> Dict[str, Any]:
+    with Session(engine) as session:
+        settings = session.get(Settings, 1)
+        if not settings:
+            return {}
+        return dict(getattr(settings, f"{role}_cfg") or {})
+
+
+def get_role_cfg(role: str) -> Dict[str, Any]:
+    """assistant 未单独配置时继承 generator（02 设计决策 #12）。"""
+    cfg = _raw_role_cfg(role)
+    if role == "assistant" and not is_configured(cfg):
+        cfg = _raw_role_cfg("generator")
+    return cfg
+
+
+def is_configured(cfg: Dict[str, Any]) -> bool:
+    return bool(cfg.get("base_url") and cfg.get("api_key") and cfg.get("model"))
+
+
+def mock_mode(role: str) -> bool:
+    return not is_configured(get_role_cfg(role))
+
+
+# ---------- 上下文预算裁剪 ----------
+# parts: (优先级小者先截断, 文本)；调用方按 03 规则排序：节点定义 > 模板 > 前序摘要 > 全局大纲
+
+def trim_context(parts: List[Tuple[int, str]], max_chars: int) -> List[Tuple[int, str]]:
+    """按优先级保留上下文片段：低优先级片段从尾部截断，超预算整体丢弃。"""
+    total = sum(len(t) for _, t in parts)
+    if total <= max_chars:
+        return parts
+    ordered = sorted(parts, key=lambda p: p[0], reverse=True)  # 高优先级在前
+    kept: List[Tuple[int, str]] = []
+    used = 0
+    for pri, text in ordered:
+        remain = max_chars - used
+        if remain <= 200:
+            break
+        if len(text) <= remain:
+            kept.append((pri, text))
+            used += len(text)
+        else:
+            kept.append((pri, text[:remain] + "\n…(已按上下文预算截断)"))
+            used += remain
+    logger.info("上下文裁剪: %d -> %d chars, 保留 %d/%d 段", total, used, len(kept), len(parts))
+    return kept
+
+
+# ---------- 记账 ----------
+
+def _record_call(role: str, purpose: str, model: str, prompt: str, content: str,
+                 latency_ms: int, status: str, roadmap_id: Optional[int] = None,
+                 usage: Optional[Dict[str, int]] = None) -> None:
+    try:
+        with Session(engine) as session:
+            pt = (usage or {}).get("prompt_tokens") or max(1, len(prompt) // 3)
+            ct = (usage or {}).get("completion_tokens") or max(1, len(content or "") // 3)
+            session.add(LlmCall(role=role, purpose=purpose, model=model,
+                                prompt_tokens=pt, completion_tokens=ct,
+                                latency_ms=latency_ms, status=status, roadmap_id=roadmap_id))
+            session.commit()
+    except Exception as e:  # noqa: BLE001  记账失败不影响主流程
+        logger.warning("记账失败: %s", e)
+
+
+# ---------- JSON mode 能力缓存 + 降级链 ----------
+
+_json_mode_ok: Dict[str, bool] = {}  # base_url -> 是否支持 response_format json_object
+
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    return json.loads(text)
+
+
+async def _http_post(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /chat/completions，429/5xx 指数退避重试。"""
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    last_err: Optional[Exception] = None
+    for attempt in range(RETRY_ON_STATUS):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise httpx.HTTPStatusError(f"retryable {resp.status_code}",
+                                                request=resp.request, response=resp)
+                resp.raise_for_status()
+                return resp.json()
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            last_err = e
+            wait = 2 ** attempt
+            logger.warning("API 调用失败(%s，第%d次)，%ds 后重试", e, attempt + 1, wait)
+            await asyncio.sleep(wait)
+    raise RuntimeError(f"API 重试 {RETRY_ON_STATUS} 次后仍失败: {last_err}")
+
+
+async def _real_call(role: str, cfg: Dict[str, Any], prompt: str, purpose: str,
+                     roadmap_id: Optional[int] = None) -> Dict[str, Any]:
+    """真实调用 + 降级链：JSON mode → 裸 prompt(内嵌 schema) + 解析重试。"""
+    base = cfg["base_url"]
+    supports_json = _json_mode_ok.get(base, True)  # 未知先乐观尝试
+    messages = [{"role": "user", "content": prompt}]
+
+    for attempt in range(JSON_PARSE_RETRY + 1):
+        body: Dict[str, Any] = {
+            "model": cfg["model"], "messages": messages, "temperature": 0.3,
+        }
+        if supports_json:
+            body["response_format"] = {"type": "json_object"}
+
+        t0 = time.monotonic()
+        try:
+            data = await _http_post(cfg, body)
+        except RuntimeError:
+            if supports_json and body.get("response_format"):
+                _json_mode_ok[base] = False  # 可能是 response_format 不支持，降级
+                supports_json = False
+                continue
+            raise
+        latency = int((time.monotonic() - t0) * 1000)
+        content = data["choices"][0]["message"]["content"]
+        _record_call(role, purpose, cfg["model"], prompt, content, latency,
+                     "ok", roadmap_id, data.get("usage"))
+        try:
+            return _extract_json(content)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning("JSON 解析失败(第%d次): %s", attempt + 1, e)
+            messages = [{"role": "user", "content": prompt},
+                        {"role": "assistant", "content": content[:2000]},
+                        {"role": "user", "content":
+                         f"上次输出不是合法 JSON（错误：{e}）。请只输出符合要求的 JSON，不要任何其他文字。"}]
+    raise RuntimeError("模型未能输出合法 JSON（已重试）")
+
+
+async def call_json(role: str, prompt: str, mock_payload: Optional[Dict[str, Any]] = None,
+                    mock_delay: float = 2.0, purpose: str = "", roadmap_id: Optional[int] = None
+                    ) -> Dict[str, Any]:
+    """按环节调用 LLM 返回 JSON；未配置该环节时返回 mock_payload（演示模式）。"""
+    cfg = get_role_cfg(role)
+    if not is_configured(cfg):
+        await asyncio.sleep(mock_delay)
+        _record_call(role, purpose or "mock", "demo-mock", "", "", int(mock_delay * 1000),
+                     "mock", roadmap_id)
+        if mock_payload is None:
+            raise RuntimeError(f"演示模式缺少 {role} 的 mock 数据")
+        return mock_payload
+    return await _real_call(role, cfg, prompt, purpose or role, roadmap_id)
+
+
+async def test_role(role: str) -> Dict[str, Any]:
+    """连通性测试：发一次最小调用。"""
+    cfg = get_role_cfg(role)
+    if not is_configured(cfg):
+        return {"ok": False, "error": "该环节未配置完整（base_url / api_key / model 均必填）"}
+    try:
+        t0 = time.monotonic()
+        data = await _http_post(cfg, {"model": cfg["model"], "messages": [
+            {"role": "user", "content": '请只输出 JSON：{"ok": true}'}],
+            "temperature": 0})
+        latency = int((time.monotonic() - t0) * 1000)
+        content = data["choices"][0]["message"]["content"]
+        ok = "true" in content.lower()
+        _record_call(role, "connectivity-test", cfg["model"], content, content, latency,
+                     "ok" if ok else "bad_output")
+        return {"ok": ok, "latency_ms": latency}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+# ---------- assistant 流式对话 ----------
+
+ASSISTANT_SYSTEM = (
+    "你是 StudyForge 的学习伴侣。用户正在学习「{node_title}」（知识点：{kp_list}）。\n"
+    "当前节点内容摘要：{summary}\n\n"
+    "要求：1) 优先结合当前学习内容解答，举例尽量贴近本节点知识点；"
+    "2) 回答简洁（一般不超过 300 字），必要时给一个小例子或代码；"
+    "3) 用户问的与当前学习无关时，可以回答但提醒回到学习；"
+    "4) 使用中文，markdown 格式。"
+)
+
+_MOCK_ANSWERS = [
+    "这个问题和当前节点「{node_title}」直接相关。可以这样理解：先抓住它解决的核心问题，"
+    "再看它的基本用法，最后自己动手跑一个小例子验证——概念 → 用法 → 验证 三步走。\n\n"
+    "```python\n# 动手验证一下\nprint('试试把例子改成你自己的场景')\n```",
+    "关于「{question}」，可以从两个角度入手：① 它是什么（定义/语法层面）；② 什么时候用（场景层面）。"
+    "讲义的「要点讲解」小节有对应说明，建议对照着看，再把示例代码改一改跑一遍。",
+    "这是个好问题。结合本节知识点，建议先回顾讲义中的示例，"
+    "然后试着用自己的话复述一遍——能复述清楚就说明理解到位了。演示模式下我只能给通用建议，"
+    "配置真实模型后我会给出针对你问题的具体解答。",
+]
+
+
+async def chat_stream(messages: List[Dict[str, str]], roadmap_id: Optional[int] = None):
+    """assistant 流式对话：逐段 yield 文本 delta。"""
+    cfg = get_role_cfg("assistant")
+    last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+    if not is_configured(cfg):
+        # 演示模式：按问题长度选模板，分段流式输出
+        answer = _MOCK_ANSWERS[len(last_user) % len(_MOCK_ANSWERS)]
+        for key, val in (
+            ("node_title", "当前节点"), ("kp_list", "本节知识点"), ("question", last_user),
+        ):
+            answer = answer.replace("{" + key + "}", val)
+        _record_call("assistant", "chat", "demo-mock", last_user, answer,
+                     800, "mock", roadmap_id)
+        for i in range(0, len(answer), 6):
+            yield answer[i:i + 6]
+            await asyncio.sleep(0.04)
+        return
+
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    body = {"model": cfg["model"], "messages": messages, "temperature": 0.5, "stream": True}
+    t0 = time.monotonic()
+    chunks: List[str] = []
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream("POST", url, headers=headers, json=body) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+                if delta:
+                    chunks.append(delta)
+                    yield delta
+    _record_call("assistant", "chat", cfg["model"], last_user, "".join(chunks),
+                 int((time.monotonic() - t0) * 1000), "ok", roadmap_id)

@@ -1,0 +1,34 @@
+# secrets / runtime data (contains API keys — never commit)
+server/data/
+
+# dependencies
+node_modules/
+.venv/
+venv/
+
+# build artifacts
+web/dist/
+apps/desktop/release/
+apps/desktop/resources/
+dist/
+build/
+*.spec
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS / exFAT junk
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# logs & misc
+*.log
+*.sqlite
+*.db
+
+# local plugin/tool state
+.mimosa/

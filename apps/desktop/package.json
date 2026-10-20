@@ -1,0 +1,29 @@
+{
+  "name": "studyforge-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "StudyForge desktop shell (Electron)",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.studyforge.app",
+    "productName": "StudyForge",
+    "directories": { "output": "release" },
+    "files": ["main.js", "preload.js"],
+    "extraResources": [
+      { "from": "resources/${os}", "to": "." },
+      { "from": "resources/web-dist", "to": "web-dist" }
+    ],
+    "mac": { "target": "dmg", "category": "public.app-category.education" },
+    "win": { "target": "nsis" },
+    "linux": { "target": "AppImage" }
+  }
+}

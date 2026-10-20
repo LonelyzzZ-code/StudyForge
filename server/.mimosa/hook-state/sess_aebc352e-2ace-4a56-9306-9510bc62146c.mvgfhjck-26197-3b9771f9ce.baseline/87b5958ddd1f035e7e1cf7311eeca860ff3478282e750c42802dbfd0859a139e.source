@@ -1,0 +1,216 @@
+"""演示模式数据：无 API key 时的完整体验（Python 入门路线）。
+
+精写 n1/n4 两个节点展示真实生成质感，其余节点由 fallback 模板程序化生成。
+"""
+from typing import Any, Dict, List
+
+# ---------- planner 输出（路线 DAG） ----------
+
+PLANNER_MOCK: Dict[str, Any] = {
+    "domain": "code",
+    "nodes": [
+        {"key": "n1", "title": "变量与数据类型", "est_minutes": 45,
+         "summary": "变量是贴在数据上的名字；掌握 int/float/str/bool 四类基础类型与类型转换。",
+         "kp": ["变量定义", "数据类型", "类型转换", "动态类型"]},
+        {"key": "n2", "title": "运算符与表达式", "est_minutes": 40,
+         "summary": "用运算符把变量组合成表达式；重点是整除、取余与比较运算的区别。",
+         "kp": ["算术运算符", "整除与取余", "比较运算符", "优先级"]},
+        {"key": "n3", "title": "条件语句", "est_minutes": 50,
+         "summary": "让程序分岔：if/elif/else 的分支逻辑与缩进规则。",
+         "kp": ["if 语句", "elif 多分支", "缩进规则", "布尔表达式"]},
+        {"key": "n4", "title": "循环", "est_minutes": 60,
+         "summary": "重复执行：for 遍历序列、while 条件循环、break/continue 控制流。",
+         "kp": ["for 循环", "while 循环", "break 与 continue", "range 函数"]},
+        {"key": "n5", "title": "列表与字典", "est_minutes": 55,
+         "summary": "组织一批数据：列表的有序存取与字典的键值映射。",
+         "kp": ["列表操作", "切片", "字典", "增删改查"]},
+        {"key": "n6", "title": "函数", "est_minutes": 50,
+         "summary": "把逻辑打包复用：定义、参数、返回值与作用域。",
+         "kp": ["函数定义", "参数传递", "返回值", "作用域"]},
+        {"key": "n7", "title": "面向对象基础", "est_minutes": 60,
+         "summary": "用类描述事物：属性、方法与实例化。",
+         "kp": ["类与实例", "属性", "方法", "__init__"]},
+        {"key": "n8", "title": "综合小项目：命令行待办清单", "est_minutes": 90,
+         "summary": "串联全部知识点，完成一个可运行的命令行待办事项应用。",
+         "kp": ["需求拆解", "数据结构选型", "循环交互", "函数组织"]},
+    ],
+    "edges": [
+        {"from": "n1", "to": "n2"}, {"from": "n2", "to": "n3"},
+        {"from": "n3", "to": "n4"}, {"from": "n4", "to": "n5"},
+        {"from": "n4", "to": "n6"}, {"from": "n6", "to": "n7"},
+        {"from": "n5", "to": "n8"}, {"from": "n7", "to": "n8"},
+    ],
+}
+
+
+# ---------- generator 输出（内容包），精写节点 ----------
+
+_PK1: Dict[str, Any] = {
+    "lecture": {"sections": [
+        {"title": "概念引入", "content": (
+            "程序的本质是**处理数据**，而变量（variable）就是给数据贴上名字，方便后续使用。\n\n"
+            "```python\nage = 18            # 整数 int\nprice = 9.9        # 浮点数 float\nname = \"小明\"      # 字符串 str\nis_student = True  # 布尔 bool\n```\n\n"
+            "Python 不需要提前声明类型，赋值那一刻类型就确定了——这叫**动态类型**。用 `type(x)` 可以随时查看：`type(age)` 返回 `<class 'int'>`。")},
+        {"title": "要点讲解", "content": (
+            "**1. 变量名规则**：字母/数字/下划线组成，不能以数字开头，区分大小写。`my_age` 合法，`2age` 非法。\n\n"
+            "**2. 类型转换**：`int(\"18\")` → 18，`str(3.14)` → \"3.14\"，`float(\"9.9\")` → 9.9。注意 `int(\"abc\")` 会直接报错 `ValueError`。\n\n"
+            "**3. 常见坑**：`\"3\" + 5` 报错（字符串不能加整数）；`\"3\" * 2` 却合法，结果是 `\"33\"`（字符串重复）。")},
+        {"title": "示例与练习", "content": (
+            "综合示例——交换两个变量的值，Python 有独特的写法：\n\n"
+            "```python\na, b = 1, 2\na, b = b, a   # 一行完成交换，无需临时变量\nprint(a, b)   # 输出: 2 1\n```\n\n"
+            "试一试：定义变量保存你的名字和出生年份，计算并打印你的年龄。")},
+    ]},
+    "summary": "变量是数据的名字；四类基础类型 int/float/str/bool 赋值即确定；int()/str()/float() 做类型转换；字符串与数字不能直接相加。",
+    "practice": {
+        "goal": "写一个「个人信息卡」程序",
+        "requirements": ["定义 name、birth_year、height 三个不同类型的变量", "计算今年的年龄", "用 print 输出完整句子"],
+        "checklist": ["type() 检查三个变量类型是否符合预期", "年龄计算是否用了变量而非写死数字", "输出是否为一句通顺的话"],
+    },
+    "questions": [
+        {"tier": "concept", "qtype": "choice", "stem": "`type(3.14)` 的结果是？",
+         "options": ["<class 'int'>", "<class 'float'>", "<class 'str'>", "<class 'bool'>"],
+         "answer": 1, "kp_tags": ["数据类型"], "skill": "记忆", "difficulty": 1},
+        {"tier": "concept", "qtype": "choice", "stem": "以下哪个变量名是合法的？",
+         "options": ["2age", "my-age", "my_age", "class"],
+         "answer": 2, "kp_tags": ["变量定义"], "skill": "记忆", "difficulty": 1},
+        {"tier": "concept", "qtype": "blank", "stem": "把字符串 \"18\" 转换为整数，应写作 `____(\"18\")`",
+         "answer": "int", "kp_tags": ["类型转换"], "skill": "记忆", "difficulty": 1},
+        {"tier": "basic", "qtype": "choice", "stem": "表达式 `\"3\" * 2` 的结果是？",
+         "options": ["6", "\"33\"", "\"3 3\"", "报错"],
+         "answer": 1, "kp_tags": ["数据类型"], "skill": "理解", "difficulty": 2},
+        {"tier": "basic", "qtype": "choice", "stem": "执行 `x = \"5\"` 后，`x + 2` 会发生什么？",
+         "options": ["得到 7", "得到 \"52\"", "得到 \"5\" + 2", "抛出 TypeError"],
+         "answer": 3, "kp_tags": ["类型转换", "数据类型"], "skill": "理解", "difficulty": 2},
+        {"tier": "basic", "qtype": "blank", "stem": "Python 中查看变量类型的函数是 `____(x)`",
+         "answer": "type", "kp_tags": ["数据类型"], "skill": "理解", "difficulty": 1},
+        {"tier": "basic", "qtype": "short", "stem": "用一句话说明什么是「动态类型」。",
+         "std_answer": "变量类型在赋值时才确定，且可以随重新赋值而改变，无需提前声明。",
+         "key_points": ["赋值时确定", "无需提前声明", "类型可改变"], "kp_tags": ["动态类型"], "skill": "理解", "difficulty": 2},
+    ],
+}
+
+_PK4: Dict[str, Any] = {
+    "lecture": {"sections": [
+        {"title": "概念引入", "content": (
+            "当需要重复做一件事，与其复制十行代码，不如用一个循环（loop）。\n\n"
+            "```python\nfor i in range(3):\n    print(\"第\", i, \"次\")   # 执行 3 次，i 依次为 0,1,2\n\ncount = 0\nwhile count < 3:\n    print(\"count =\", count)\n    count += 1           # 别忘了推进条件，否则死循环\n```\n\n"
+            "**for** 适合「知道次数 / 遍历序列」，**while** 适合「满足条件就一直做」。")},
+        {"title": "要点讲解", "content": (
+            "**1. range 函数**：`range(5)` → 0~4；`range(2, 6)` → 2~5；`range(0, 10, 2)` → 0,2,4,6,8。左闭右开。\n\n"
+            "**2. break 与 continue**：`break` 立刻跳出整个循环；`continue` 跳过本轮剩余语句，进入下一轮。\n\n"
+            "**3. 循环 + else**（了解即可）：循环未被 break 中断时执行 else 块，常用于「找没找到」判断。")},
+        {"title": "示例与练习", "content": (
+            "示例——找出 100 以内所有 3 的倍数：\n\n"
+            "```python\nfor n in range(1, 100):\n    if n % 3 == 0:\n        print(n, end=\" \")\n```\n\n"
+            "试一试：用 while 循环计算 1+2+3+...+100 的和。")},
+    ]},
+    "summary": "for 遍历序列、while 按条件循环；range 左闭右开；break 跳出整个循环，continue 只结束本轮；while 必须推进条件防死循环。",
+    "practice": {
+        "goal": "打印九九乘法表",
+        "requirements": ["用两层 for 循环嵌套", "按 1×1=1 到 9×9=81 的顺序输出", "每行结束后换行"],
+        "checklist": ["内层循环边界是否用到外层变量", "输出是否呈三角形", "是否用 end 参数控制换行"],
+    },
+    "questions": [
+        {"tier": "concept", "qtype": "choice", "stem": "`range(2, 6)` 包含哪些数字？",
+         "options": ["2,3,4,5,6", "2,3,4,5", "3,4,5", "2,4,6"],
+         "answer": 1, "kp_tags": ["range 函数"], "skill": "记忆", "difficulty": 1},
+        {"tier": "concept", "qtype": "choice", "stem": "想立刻结束整个循环，应该用？",
+         "options": ["continue", "break", "return", "pass"],
+         "answer": 1, "kp_tags": ["break 与 continue"], "skill": "记忆", "difficulty": 1},
+        {"tier": "concept", "qtype": "blank", "stem": "`range(0, 10, 2)` 会生成 0, 2, 4, 6, ____",
+         "answer": "8", "kp_tags": ["range 函数"], "skill": "记忆", "difficulty": 1},
+        {"tier": "basic", "qtype": "choice", "stem": "以下代码输出什么？\n```python\nfor i in range(5):\n    if i == 3:\n        break\n    print(i, end=\" \")\n```",
+         "options": ["0 1 2 3 4", "0 1 2", "0 1 2 3", "3"],
+         "answer": 1, "kp_tags": ["break 与 continue", "for 循环"], "skill": "理解", "difficulty": 2},
+        {"tier": "basic", "qtype": "choice", "stem": "while 循环中最容易导致死循环的原因是？",
+         "options": ["循环体太长", "忘记推进循环条件变量", "条件初始为 False", "使用了 break"],
+         "answer": 1, "kp_tags": ["while 循环"], "skill": "理解", "difficulty": 2},
+        {"tier": "basic", "qtype": "blank", "stem": "`continue` 的作用是跳过本轮剩余代码，进入循环的____。",
+         "answer": "下一轮", "kp_tags": ["break 与 continue"], "skill": "理解", "difficulty": 1},
+        {"tier": "basic", "qtype": "short", "stem": "用一句话说明 for 循环和 while 循环各自适合的场景。",
+         "std_answer": "for 适合已知次数或遍历序列的重复，while 适合满足条件就持续执行的重复。",
+         "key_points": ["已知次数或遍历", "满足条件", "持续执行"], "kp_tags": ["for 循环", "while 循环"], "skill": "理解", "difficulty": 2},
+    ],
+}
+
+PACKAGES_MOCK: Dict[str, Dict[str, Any]] = {"n1": _PK1, "n4": _PK4}
+
+
+def fallback_package(node: Dict[str, Any]) -> Dict[str, Any]:
+    """演示模式下为未精写节点程序化生成内容包。"""
+    title = node["title"]
+    kps = node.get("kp", [])
+    kp0 = kps[0] if kps else title
+    kp1 = kps[1] if len(kps) > 1 else kp0
+    lecture = {"sections": [
+        {"title": "概念引入", "content": (
+            f"本节学习 **{title}**。核心知识点：{'、'.join(kps) if kps else title}。\n\n"
+            f"先建立一个整体印象：{node.get('summary', '')}\n\n"
+            "带着问题学习效果最好：这个知识点解决什么问题？没有它会怎样？")},
+        {"title": "要点讲解", "content": (
+            f"**要点一（{kp0}）**：先理解它解决什么问题，再记语法形式。\n\n"
+            f"**要点二（{kp1}）**：注意边界情况与常见错误，动手敲一遍最有效。\n\n"
+            "**学习建议**：看懂示例后，遮住答案自己重写一遍，才算真正掌握。")},
+        {"title": "示例与练习", "content": (
+            f"围绕 {kp0} 写一个小例子，运行并修改参数观察结果变化。\n\n"
+            f"然后完成右侧「实践任务」中的 {title} 小练习。")},
+    ]}
+    return {
+        "lecture": lecture,
+        "summary": f"{title}：掌握 {'、'.join(kps[:2])} 的核心概念与基本用法。",
+        "practice": {
+            "goal": f"围绕「{title}」完成一个小练习",
+            "requirements": [f"运用 {kp0} 解决一个具体小问题", f"至少包含一次对 {kp1} 的使用"],
+            "checklist": ["代码能独立运行", "关键概念都用到了", "能口头说清每行代码的作用"],
+        },
+        "questions": [
+            {"tier": "concept", "qtype": "choice",
+             "stem": f"关于「{kp0}」，下列说法正确的是？",
+             "options": ["它只在工作场景中使用", "它是本节的核心知识点之一", "它属于高等数学内容", "它无法在代码中体现"],
+             "answer": 1, "kp_tags": [kp0], "skill": "记忆", "difficulty": 1},
+            {"tier": "concept", "qtype": "choice",
+             "stem": f"学习「{title}」时，最有效的做法是？",
+             "options": ["只看不动手", "看懂示例后自己重写一遍", "跳过示例直接做题", "背下所有语法"],
+             "answer": 1, "kp_tags": [kp1], "skill": "记忆", "difficulty": 1},
+            {"tier": "concept", "qtype": "blank",
+             "stem": f"本节主题是「____」。（提示：{kps[0] if kps else title} 相关）",
+             "answer": title, "kp_tags": [kp0], "skill": "记忆", "difficulty": 1},
+            {"tier": "basic", "qtype": "choice",
+             "stem": f"在实际编程中运用「{kp0}」时，首先应该考虑的问题是？",
+             "options": ["它能解决什么问题", "它的英文怎么拼写", "别人是否用过它", "它是否流行"],
+             "answer": 0, "kp_tags": [kp0], "skill": "理解", "difficulty": 2},
+            {"tier": "basic", "qtype": "blank",
+             "stem": f"掌握「{kp1}」的判断标准：能独立写出可____的代码。",
+             "answer": "运行", "kp_tags": [kp1], "skill": "理解", "difficulty": 1},
+            {"tier": "basic", "qtype": "short",
+             "stem": f"用一句话说明「{kp0}」的作用。",
+             "std_answer": f"{kp0} 是实现 {title} 目标的基础手段，为后续操作提供支撑。",
+             "key_points": [kp0[:2] if len(kp0) > 2 else kp0, "基础", "支撑"],
+             "kp_tags": [kp0], "skill": "理解", "difficulty": 2},
+        ],
+    }
+
+
+def make_variant_mock(q: Dict[str, Any]) -> Dict[str, Any]:
+    """演示模式变式题：同考点换问法/换选项顺序（真实模式由 generator 生成）。"""
+    stem = str(q.get("stem", ""))
+    rewrites = [
+        f"（换个情境再考一次）{stem}",
+        f"结合实际使用场景想一想：{stem}",
+        f"检验一下你是否真正掌握：{stem}",
+    ]
+    new_stem = rewrites[sum(ord(c) for c in stem) % len(rewrites)]
+    data = dict(q)
+    data["stem"] = new_stem
+    data["is_variant"] = True
+    if q.get("qtype") == "choice" and len(q.get("options") or []) == 4:
+        shift = 1 + (sum(ord(c) for c in stem) % 3)
+        opts = list(q["options"])
+        ans = q.get("answer")
+        rotated = opts[-shift:] + opts[:-shift]
+        data["options"] = rotated
+        if isinstance(ans, int):
+            data["answer"] = (ans + shift) % 4
+    elif q.get("qtype") == "short":
+        data["stem"] = f"用自己的话说清楚：{new_stem}"
+    return data
